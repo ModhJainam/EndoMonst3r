@@ -55,6 +55,22 @@ class MonST3RDataPreparer:
                 'rX': 'quot_x', 'rY': 'quot_y', 'rZ': 'quot_z', 'rW': 'quot_w'
             }
             df = df.rename(columns=column_map)
+        elif self.pose_file.suffix == '.txt':
+            # For MiroCam's txt format with semicolon separators
+            df = pd.read_csv(self.pose_file, sep=';', skipinitialspace=True)
+            # Clean column names and map them to expected format
+            df.columns = df.columns.str.strip().str.replace(r'\W+', '', regex=True)
+            column_map = {
+                'px': 'trans_x', 'py': 'trans_y', 'pz': 'trans_z',
+                'Qx': 'quot_x', 'Qy': 'quot_y', 'Qz': 'quot_z', 'Qw': 'quot_w'
+            }
+            df = df.rename(columns=column_map)
+            # Skip the first row if it contains units (s, m, Qunit)
+            if 's' in str(df.iloc[0, 0]) and 'm' in str(df.iloc[0, 1]):
+                df = df.iloc[1:].reset_index(drop=True)
+            # Convert all columns to float
+            for col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
         else:
             # For Excel, use direct column access without rename
             df = pd.read_excel(self.pose_file, usecols=[
@@ -64,8 +80,8 @@ class MonST3RDataPreparer:
 
         # Convert to numpy array early for consistency
         poses = df.to_numpy(dtype=np.float32, copy=True)
-
         return poses
+
 
     def process_images(self):
         """Process and resize images from PNG/JPG sources"""
