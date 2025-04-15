@@ -57,31 +57,53 @@ class MonST3RDataPreparer:
             df = df.rename(columns=column_map)
         elif self.pose_file.suffix == '.txt':
             # For MiroCam's txt format with semicolon separators
-            df = pd.read_csv(self.pose_file, sep=';', skipinitialspace=True)
+            df = pd.read_csv(self.pose_file, sep=';', skipinitialspace=True, low_memory=False)
+            
             # Clean column names and map them to expected format
-            df.columns = df.columns.str.strip().str.replace(r'\W+', '', regex=True)
+            df.columns = df.columns.str.strip()
+            
+            # Print available columns for debugging
+            print("Original columns:", df.columns.tolist())
+            
+            # Map columns, explicitly excluding the time column 't'
             column_map = {
-                'px': 'trans_x', 'py': 'trans_y', 'pz': 'trans_z',
+                'p_x': 'trans_x', 'p_y': 'trans_y', 'p_z': 'trans_z',
                 'Qx': 'quot_x', 'Qy': 'quot_y', 'Qz': 'quot_z', 'Qw': 'quot_w'
             }
             df = df.rename(columns=column_map)
+            
+            # Print columns after renaming
+            print("After renaming:", df.columns.tolist())
+            
             # Skip the first row if it contains units (s, m, Qunit)
             if 's' in str(df.iloc[0, 0]) and 'm' in str(df.iloc[0, 1]):
                 df = df.iloc[1:].reset_index(drop=True)
+            
             # Convert all columns to float
             for col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            # Check if all required columns exist
+            required_columns = ['trans_x', 'trans_y', 'trans_z', 'quot_x', 'quot_y', 'quot_z', 'quot_w']
+            if all(col in df.columns for col in required_columns):
+                df = df[required_columns]
+            else:
+                print("Warning: Not all required columns found. Available columns:", df.columns.tolist())
+                # If columns aren't found, try to use the original columns directly
+                if all(col in df.columns for col in ['p_x', 'p_y', 'p_z', 'Qx', 'Qy', 'Qz', 'Qw']):
+                    df = df[['p_x', 'p_y', 'p_z', 'Qx', 'Qy', 'Qz', 'Qw']]
+                    # Rename them now
+                    df.columns = required_columns
         else:
             # For Excel, use direct column access without rename
             df = pd.read_excel(self.pose_file, usecols=[
                 'trans_x', 'trans_y', 'trans_z',
                 'quot_x', 'quot_y', 'quot_z', 'quot_w'
             ])
-
+        
         # Convert to numpy array early for consistency
         poses = df.to_numpy(dtype=np.float32, copy=True)
         return poses
-
 
     def process_images(self):
         """Process and resize images from PNG/JPG sources"""

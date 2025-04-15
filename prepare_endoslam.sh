@@ -20,27 +20,29 @@ process_sequence() {
 
     log_message "Processing: $camera_type - $organ - $trajectory"
 
-    # UnityCam-specific paths
+    # UnityCam-specific paths (no trajectory level)
     if [ "$camera_type" == "UnityCam" ]; then
-        frames_dir="${ENDOSLAM_ROOT}/Cameras/${camera_type}/${organ}/${trajectory}/Frames"
-        poses_dir="${ENDOSLAM_ROOT}/Cameras/${camera_type}/${organ}/${trajectory}/Poses"
-        depth_dir="${ENDOSLAM_ROOT}/Cameras/${camera_type}/${organ}/${trajectory}/Pixelwise Depths"
+        frames_dir="${ENDOSLAM_ROOT}/Cameras/${camera_type}/${organ}/Frames"
+        poses_dir="${ENDOSLAM_ROOT}/Cameras/${camera_type}/${organ}/Poses"
+        depth_dir="${ENDOSLAM_ROOT}/Cameras/${camera_type}/${organ}/Pixelwise Depths"
         poses_file=$(find "$poses_dir" -maxdepth 1 -name '*.csv' -print -quit)
+        output_dir="${OUTPUT_ROOT}/${camera_type}/${organ}"
     # MiroCam-specific paths
     elif [ "$camera_type" == "MiroCam" ]; then
         frames_dir="${ENDOSLAM_ROOT}/Cameras/${camera_type}/${organ}/${trajectory}/Frames"
         poses_dir="${ENDOSLAM_ROOT}/Cameras/${camera_type}/${organ}/${trajectory}/Poses"
         depth_dir=""
         poses_file=$(find "$poses_dir" -maxdepth 1 -name '*.txt' -print -quit)
+        output_dir="${OUTPUT_ROOT}/${camera_type}/${organ}/${trajectory}"
     else
         frames_dir="${ENDOSLAM_ROOT}/Cameras/${camera_type}/${organ}/${trajectory}/Frames"
         poses_dir="${ENDOSLAM_ROOT}/Cameras/${camera_type}/${organ}/${trajectory}/Poses"
         depth_dir=""
         poses_file=$(find "$poses_dir" -maxdepth 1 -name '*.xlsx' -print -quit)
+        output_dir="${OUTPUT_ROOT}/${camera_type}/${organ}/${trajectory}"
     fi
 
     intrinsics_file="${ENDOSLAM_ROOT}/Cameras/${camera_type}/Calibration/cam.txt"
-    output_dir="${OUTPUT_ROOT}/${camera_type}/${organ}/${trajectory}"
 
     # Validation checks
     [ -d "$frames_dir" ] || { log_message "ERROR: Missing frames directory"; return 1; }
@@ -57,7 +59,7 @@ process_sequence() {
         --intrinsics "$intrinsics_file" \
         --output_dir "$output_dir" \
         ${depth_dir:+--depth_dir "$depth_dir"} \
-        ${stl_file:+--stl "$stl_file"}
+        # ${stl_file:+--stl "$stl_file"}
 }
 
 # Main processing loop
@@ -70,9 +72,15 @@ find "${ENDOSLAM_ROOT}/Cameras" -mindepth 1 -maxdepth 1 -type d -print0 | while 
         
         stl_file="${ENDOSLAM_ROOT}/3D Scanners/${organ_name}/${organ_name}.stl"
         
-        find "$organ" -mindepth 1 -maxdepth 1 -type d -print0 | while IFS= read -r -d '' trajectory; do
-            process_sequence "$camera_name" "$organ_name" "$(basename "$trajectory")" "$stl_file"
-        done
+        # Handle UnityCam differently - no trajectory level
+        if [ "$camera_name" == "UnityCam" ]; then
+            process_sequence "$camera_name" "$organ_name" "" "$stl_file"
+        else
+            # For other cameras, process each trajectory
+            find "$organ" -mindepth 1 -maxdepth 1 -type d -print0 | while IFS= read -r -d '' trajectory; do
+                process_sequence "$camera_name" "$organ_name" "$(basename "$trajectory")" "$stl_file"
+            done
+        fi
     done
 done
 
