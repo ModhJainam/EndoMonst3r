@@ -1,0 +1,8 @@
+path,frame_count,organ,camera
+UnityCam\Colon,43774,Colon,UnityCam
+HighCam\Colon-IV\TumorfreeTrajectory_3,1760,Colon-IV,HighCam
+LowCam\Small Intestine\TumorfreeTrajectory_1,2382,Small Intestine,LowCam
+LowCam\Stomach-II\TumorfreeTrajectory_2,60,Stomach-II,LowCam
+HighCam\Small Intestine\TumorfreeTrajectory_1,3050,Small Intestine,HighCam
+LowCam\Stomach-I\TumorfreeTrajectory_3,1242,Stomach-I,LowCam
+LowCam\Stomach-III\TumorfreeTrajectory_4,2036,Stomach-III,LowCam

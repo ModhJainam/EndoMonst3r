@@ -6,7 +6,7 @@ import numpy as np
 
 def create_splits(data_root, output_dir, ratios=(0.7, 0.15, 0.15), seed=42):
     """
-    Create train/val/test splits maintaining complete trajectories within splits
+    Create train/val/test splits
     """
     data_root = Path(data_root)
     output_dir = Path(output_dir)
@@ -16,30 +16,38 @@ def create_splits(data_root, output_dir, ratios=(0.7, 0.15, 0.15), seed=42):
     # Collect all trajectories
     trajectories = []
     for camera_dir in data_root.glob("*"):
+        camera_name = camera_dir.name
         for organ_dir in camera_dir.glob("*"):
-            if organ_dir.name == "Calibration":
-                continue
-                
-            for traj_dir in organ_dir.glob("*"):
-                if traj_dir.is_dir():
-                    frames = list((traj_dir / "images").glob("*.*"))
-                    if len(frames) > 0:
-                        trajectories.append({
-                            "path": traj_dir.relative_to(data_root),
-                            "frame_count": len(frames),
-                            "organ": organ_dir.name,
-                            "camera": camera_dir.name
-                        })
+            # Handle UnityCam differently (no trajectory level)
+            if camera_name == "UnityCam":
+                frames_dir = organ_dir / "images"
+                frames = list(frames_dir.glob("*.*"))
+                if frames:
+                    trajectories.append({
+                        "path": organ_dir.relative_to(data_root),
+                        "frame_count": len(frames),
+                        "organ": organ_dir.name,
+                        "camera": camera_name
+                    })
+            else:
+                # Process normal camera trajectories
+                for traj_dir in organ_dir.glob("*"):
+                    if traj_dir.is_dir():
+                        frames = list((traj_dir / "images").glob("*.*"))
+                        if frames:
+                            trajectories.append({
+                                "path": traj_dir.relative_to(data_root),
+                                "frame_count": len(frames),
+                                "organ": organ_dir.name,
+                                "camera": camera_name
+                            })
 
-    # Shuffle all trajectories
+    # Shuffle and split
     random.shuffle(trajectories)
-    
-    # Calculate split sizes
     n_total = len(trajectories)
     train_end = int(ratios[0] * n_total)
     val_end = train_end + int(ratios[1] * n_total)
-    
-    # Create splits
+
     splits = {
         "train": trajectories[:train_end],
         "val": trajectories[train_end:val_end],
@@ -48,15 +56,13 @@ def create_splits(data_root, output_dir, ratios=(0.7, 0.15, 0.15), seed=42):
 
     # Save splits
     for split_name, items in splits.items():
-        # Save trajectory metadata
         pd.DataFrame(items).to_csv(output_dir / f"{split_name}_trajectories.csv", index=False)
         
-        # Create frame-level split files
         with open(output_dir / f"{split_name}.txt", "w") as f:
             for item in items:
-                traj_path = item["path"]
+                base_path = item["path"]
                 for frame_id in range(item["frame_count"]):
-                    f.write(f"{traj_path} {frame_id:06d}\n")
+                    f.write(f"{base_path} {frame_id:06d}\n")
 
     # Print summary
     print(f"Total trajectories: {n_total}")
@@ -76,10 +82,9 @@ if __name__ == "__main__":
                       help="Random seed for reproducibility")
     
     args = parser.parse_args()
-    
     if not np.isclose(sum(args.ratios), 1.0, atol=1e-3):
         raise ValueError("Ratios must sum to 1.0")
-
+    
     create_splits(
         data_root=args.data_root,
         output_dir=args.output_dir,
