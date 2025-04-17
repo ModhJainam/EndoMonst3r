@@ -1,3 +1,4 @@
 EndoSlam/
 prepared_endoslam/
+train_test_endoslam/
 *.log

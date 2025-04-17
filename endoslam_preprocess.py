@@ -201,47 +201,68 @@ class MonST3RDataPreparer:
         return processed_count
 
     def process_stl_file(self, intrinsics):
-        """STL processing with Open3D compatibility fix"""
-       
+        """STL processing with direct xyzw quaternion usage and no time dependency."""
         mesh = o3d.io.read_triangle_mesh(str(self.stl_file))
         mesh.compute_vertex_normals()
+        
+        # Print mesh dimensions for scale verification
+        bbox = mesh.get_axis_aligned_bounding_box()
+        print(f"Mesh dimensions: {bbox.get_extent()} meters")
 
+        # Camera configuration
         fx, fy, cx, cy = intrinsics
         width, height = self.target_res
-
         intrinsic = o3d.camera.PinholeCameraIntrinsic(
             width=width, height=height, fx=fx, fy=fy, cx=cx, cy=cy)
-
+        
         poses = self.process_poses()
-
+        
         for idx, pose in enumerate(poses):
-            trans = pose[:3]
-            quat = pose[3:]
-            quat /= np.linalg.norm(quat)
+            # Use xyzw quaternion from poses
+            trans = pose[:3] * 0.001  # mm to meters conversion
+            quat = pose[3:] 
             
+            # Construct transformation matrix
             T = np.eye(4)
             T[:3, :3] = R.from_quat(quat).as_matrix()
             T[:3, 3] = trans
-
+            
+            # Visualization setup
             vis = o3d.visualization.Visualizer()
-            vis.create_window(width=width, height=height, visible=False)
+            vis.create_window(
+                width=width,
+                height=height,
+                visible=False,
+                left=50, top=50
+            )
             vis.add_geometry(mesh)
-
+            
+            # Configure camera
             ctr = vis.get_view_control()
             params = o3d.camera.PinholeCameraParameters()
             params.intrinsic = intrinsic
-            params.extrinsic = np.linalg.inv(T)
+            params.extrinsic = T
             
-            ctr.convert_from_pinhole_camera_parameters(params, allow_arbitrary=True)
+            ctr.convert_from_pinhole_camera_parameters(
+                params, 
+                allow_arbitrary=True
+            )
 
+            # Render and capture depth
             vis.poll_events()
             vis.update_renderer()
+            
             depth = vis.capture_depth_float_buffer(True)
+            depth_array = np.asarray(depth)
+            
+            print(f"Frame {idx} depth: {depth_array.min():.3f}-{depth_array.max():.3f}m")
+            np.save(self.output_dir / 'depths' / f"{idx:06d}.npy", depth_array)
+            
             vis.destroy_window()
 
-            np.save(self.output_dir / 'depths' / f"{idx:06d}.npy", np.asarray(depth))
-
         return True
+
+
 
     def process(self):
         """Main processing pipeline"""
