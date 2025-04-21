@@ -118,7 +118,7 @@ class MonST3RDataPreparer:
         # Sort by numeric filename
         image_paths = sorted(
             image_paths,
-            key=lambda x: int(x.stem) if x.stem.isdigit() else 0
+            key=lambda x: int(''.join(filter(str.isdigit, x.stem))) if any(c.isdigit() for c in x.stem) else x.stem
         )
         
         processed_count = 0
@@ -173,7 +173,7 @@ class MonST3RDataPreparer:
         
         depth_paths = sorted(
             depth_paths,
-            key=lambda x: int(x.stem) if x.stem.isdigit() else 0
+            key=lambda x: int(''.join(filter(str.isdigit, x.stem))) if any(c.isdigit() for c in x.stem) else x.stem
         )
 
         processed_count = 0
