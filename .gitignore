@@ -1,4 +1,7 @@
 EndoSlam/
 prepared_endoslam/
 train_test_endoslam/
+stl_preprocess_test/
 *.log
+c3vd/
+processed_c3vd/
