@@ -20,12 +20,12 @@ class EndoSLAMDataset(Dataset):
         self.transform = transform
         
         # Load the split file
-        split_file = os.path.join(root_dir, f"{split}.txt")
+        split_file = os.path.join(root_dir, f"train_test_endoslam/{split}.txt")
         with open(split_file, 'r') as f:
             self.samples = [line.strip().split() for line in f]
         
         # Load trajectory metadata
-        metadata_file = os.path.join(root_dir, f"{split}_trajectories.csv")
+        metadata_file = os.path.join(root_dir, f"train_test_endoslam/{split}_trajectories.csv")
         self.metadata = pd.read_csv(metadata_file)
         
         # Load camera intrinsics (assuming same for all images in a trajectory)

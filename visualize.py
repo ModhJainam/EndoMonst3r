@@ -1,13 +1,11 @@
-import os
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import tkinter as tk
 from tkinter import filedialog, ttk
 from pathlib import Path
-import cv2
 
-class EndoSLAMViewer:
+class DepthViewer:
         def __init__(self, root):
             self.root = root
             self.root.title("EndoSLAM Visualization Tool")
@@ -409,5 +407,8 @@ class EndoSLAMViewer:
 # Create and run the application
 if __name__ == "__main__":
     root = tk.Tk()
-    app = EndoSLAMViewer(root)
+    app = DepthViewer(root)
     root.mainloop()
+
+    if hasattr(app, 'traj_fig'):
+        plt.show()
