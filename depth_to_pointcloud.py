@@ -104,14 +104,19 @@ def process_multiple_depth_maps(input_dir, output_dir, fx, fy, cx, cy, file_patt
 # Example usage
 if __name__ == "__main__":
     # Replace with your camera parameters
-    fx, fy = 769.2436, 769.2436  # Focal length
+    #For EndoSlam
+    fx, fy = 178.5604, 156.0418   # Focal length
+    cx, cy = 181.8043, 155.7529  # Principal point
+
+    #For C3VD
+    fx, fy = 769.2436, 769.2436   # Focal length
     cx, cy = 678.5448, 542.9759  # Principal point
     
     # Directory with depth maps
-    input_dir = "/Users/aravjain/Documents/16824/projects/EndoSLAM/EndoSfMLearner/c3vd_output/cecum_t1_a/depth"
+    input_dir = "/Users/aravjain/Documents/16824/projects/endoMonster/Final_data/Output/c3vd_output/cecum_t1_a/depth"
     
     # Directory to save point clouds
-    output_dir = "pointcloud_c3vd"
+    output_dir = "/Users/aravjain/Documents/16824/projects/endoMonster/Final_data/Evaluations/Pointclouds/c3vd"
     
     # Process all depth maps
     process_multiple_depth_maps(input_dir, output_dir, fx, fy, cx, cy)

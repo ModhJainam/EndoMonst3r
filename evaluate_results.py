@@ -9,8 +9,8 @@ import glob
 import cv2
 
 parser = argparse.ArgumentParser(description='Evaluate depth prediction results from already completed inference')
-parser.add_argument('original_data_path', type=str, help='Path to original endoscopic dataset')
-parser.add_argument('results_path', type=str, help='Path to inference results directory')
+parser.add_argument('--original_data_path', type=str, help='Path to original endoscopic dataset')
+parser.add_argument('--results_path', type=str, help='Path to inference results directory')
 parser.add_argument('--output-dir', type=str, default='evaluation_metrics', help='Output directory for metrics')
 args = parser.parse_args()
 
