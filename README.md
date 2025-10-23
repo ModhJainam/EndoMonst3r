@@ -50,13 +50,12 @@ This freezes the encoder while adapting geometric reasoning and uncertainty cali
 
 ## Losses used for pairwise training
 
-**Robust 3D regression** on pointmaps with **confidence weighting** (heteroscedastic). Let ( \mathbf{P}_i ) be predicted 3D points, ( \mathbf{P}_i^{*} ) ground truth, and ( c_i \in (0,1] ) confidence.
+**Robust 3D regression** on pointmaps with **confidence weighting** (heteroscedastic). Let ( $\mathbf{P}_i$ ) be predicted 3D points, ( $\mathbf{P}_i^{*}$ ) ground truth, and ( $c_i \in (0,1]$ ) confidence.
 
 Robust regression:
-$$
-\mathcal{L}_{\text{reg}}
+$\mathcal{L}_{\text{reg}}$
 ========================
-
+$$
 \frac{1}{N}\sum_{i=1}^{N}
 \rho!\left(\left\lVert \mathbf{P}_i - \mathbf{P}_i^{*} \right\rVert_2\right),
 \qquad
@@ -64,10 +63,10 @@ $$
 $$
 
 Confidence-weighted term (heteroscedastic):
-$$
-\mathcal{L}_{\text{cw}}
-=======================
 
+$\mathcal{L}_{\text{cw}}$
+=======================
+$$
 \frac{1}{N}\sum_{i=1}^{N}
 \exp!\left(-s_i\right)
 \left\lVert \mathbf{P}_i - \mathbf{P}_i^{*} \right\rVert_2^2
@@ -77,10 +76,10 @@ s_i = -\log c_i,.
 $$
 
 Total:
-$$
-\mathcal{L}
-===========
 
+$\mathcal{L}$
+===========
+$$
 \alpha,\mathcal{L}*{\text{reg}}
 +
 \beta,\mathcal{L}*{\text{cw}}
@@ -94,13 +93,13 @@ Shift/scale-invariant variants are used as provided by `dust3r/losses.py` (e.g.,
 
 ## Dynamic global optimization (video mode)
 
-Pairwise pointmaps (X_{t;t'}) and (X_{t';t}) are **accumulated into a global frame** to recover per-frame **global pointmaps** (X_t) and **camera poses** (P_t = [R_t|T_t]). The global objective combines:
+Pairwise pointmaps $(X_{t;t'})$ and $(X_{t';t})$ are **accumulated into a global frame** to recover per-frame **global pointmaps** (X_t) and **camera poses** (P_t = [R_t|T_t]). The global objective combines:
 
 Alignment across edges:
 $$
-L_{\text{align}}(X, \sigma, P^W)
+L_{\text{align}}(X, \sigma, P^W)$$
 ================================
-
+$$
 \sum_{W_i \in W}
 \sum_{e \in W_i}
 \sum_{t \in e}
@@ -114,9 +113,9 @@ $$
 
 Trajectory smoothness:
 $$
-L_{\text{smooth}}(X)
+L_{\text{smooth}}(X)$$
 ====================
-
+$$
 \sum_{t}
 \left\lVert R_t^\top R_{t+1} - I \right\rVert_F
 +
@@ -125,9 +124,9 @@ $$
 
 Flow projection (camera-induced vs. estimated flow over confident static regions):
 $$
-L_{\text{flow}}(X)
+L_{\text{flow}}(X)$$
 ==================
-
+$$
 \sum_{W_i \in W}
 \sum_{t\rightarrow t' \in W_i}
 \left\lVert
@@ -143,7 +142,7 @@ The optimizer in `dust3r/cloud_opt/` solves
 $$
 \hat{X}
 =======
-
+$$
 \arg\min_{X,,P^W,,\sigma}
 ;
 L_{\text{align}} + w_{\text{smooth}},L_{\text{smooth}} + w_{\text{flow}},L_{\text{flow}} .
