@@ -1,5 +1,5 @@
 # train.py
-# Fine-tune MonST3R (decoder + heads only) with LoRA on C3VD / EndoSLAM.
+# Fine-tune MonST3R (decoder + heads only) with LoRA on C3VD / EndoSLAM using native pairwise losses.
 
 import os
 import argparse
@@ -17,8 +17,9 @@ from lora_monst3r import (
     save_checkpoint
 )
 
+
 def parse_args():
-    ap = argparse.ArgumentParser("LoRA finetuning for MonST3R (decoder+heads only)")
+    ap = argparse.ArgumentParser("LoRA finetuning for MonST3R (decoder+heads) with native pairwise losses")
     # Data
     ap.add_argument("--dataset", type=str, choices=["c3vd", "endoslam"], required=True)
     ap.add_argument("--data-root", type=str, required=True)
@@ -27,14 +28,19 @@ def parse_args():
     ap.add_argument("--image-size", type=int, default=384)
 
     # Model
-    ap.add_argument("--arch", type=str, default="base", help="MonST3R/DUSt3R arch name used by your builder")
-    ap.add_argument("--ckpt", type=str, default=None, help="optional pretrained checkpoint (.pt/.pth)")
+    ap.add_argument("--arch", type=str, default="base", help="MonST3R/DUSt3R arch name")
+    ap.add_argument("--ckpt", type=str, default=None, help="pretrained checkpoint (.pt/.pth)")
 
     # LoRA
     ap.add_argument("--lora-rank", type=int, default=8)
     ap.add_argument("--lora-alpha", type=int, default=16)
     ap.add_argument("--lora-dropout", type=float, default=0.0)
-    ap.add_argument("--train-norms", action="store_true", help="also finetune LayerNorm/BatchNorm in decoder/heads")
+    ap.add_argument("--train-norms", action="store_true")
+
+    # Loss params
+    ap.add_argument("--alpha-conf", type=float, default=1.0)
+    ap.add_argument("--norm-mode", type=str, default="avg_dis", choices=["avg_dis","med_dis","none"])
+    ap.add_argument("--gt-scale", action="store_true")
 
     # Train
     ap.add_argument("--epochs", type=int, default=10)
@@ -48,8 +54,8 @@ def parse_args():
     # Misc
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--output-dir", type=str, default="outputs/run")
-
     return ap.parse_args()
+
 
 def plot_curves(history, out_dir):
     os.makedirs(out_dir, exist_ok=True)
@@ -62,6 +68,7 @@ def plot_curves(history, out_dir):
     path = os.path.join(out_dir, "loss_curve.png")
     plt.savefig(path, bbox_inches="tight")
     print(f"[PLOT] saved {path}")
+
 
 def main():
     args = parse_args()
@@ -81,10 +88,13 @@ def main():
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
         train_norms=args.train_norms,
-        device=args.device
+        device=args.device,
+        alpha_conf=args.alpha_conf,
+        norm_mode=args.norm_mode,
+        gt_scale=args.gt_scale
     )
 
-    # Optimizer (LoRA + optional norms only)
+    # Optimizer
     optim_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = optim.AdamW(optim_params, lr=args.lr, weight_decay=args.weight_decay)
     scaler = torch.cuda.amp.GradScaler(enabled=args.device.startswith("cuda"))
@@ -119,6 +129,7 @@ def main():
 
     plot_curves(history, args.output_dir)
     print("[DONE] training complete.")
+
 
 if __name__ == "__main__":
     main()

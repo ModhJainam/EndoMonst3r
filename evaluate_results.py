@@ -1,300 +1,303 @@
+# eval.py
+# Evaluate SI-log-RMSE on depth maps:
+#  (A) Pairwise (no optimization)
+#  (B) After dynamic global optimization (alignment + smoothness + flow projection)
+
 import os
-import numpy as np
-from path import Path
+import csv
 import argparse
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import json
-import glob
-import cv2
+from collections import defaultdict
+from typing import Dict, List, Tuple, Any
 
-parser = argparse.ArgumentParser(description='Evaluate depth prediction results from already completed inference')
-parser.add_argument('--original_data_path', type=str, help='Path to original endoscopic dataset')
-parser.add_argument('--results_path', type=str, help='Path to inference results directory')
-parser.add_argument('--output-dir', type=str, default='evaluation_metrics', help='Output directory for metrics')
-args = parser.parse_args()
+import numpy as np
+import torch
+from PIL import Image
+from torchvision import transforms
 
-def compute_metrics(pred_depth, gt_depth):
-    """Compute various depth evaluation metrics"""
-    # Debug: Check shapes
-    print(f"Pred shape: {pred_depth.shape}, GT shape: {gt_depth.shape}")
-    
-    # Ensure both are 2D
-    if len(pred_depth.shape) > 2:
-        pred_depth = pred_depth.squeeze()
-    if len(gt_depth.shape) > 2:
-        gt_depth = gt_depth.squeeze()
-    
-    # Resize if shapes don't match
-    if pred_depth.shape != gt_depth.shape:
-        print(f"Resizing predicted depth from {pred_depth.shape} to {gt_depth.shape}")
-        pred_depth = cv2.resize(pred_depth, (gt_depth.shape[1], gt_depth.shape[0]), interpolation=cv2.INTER_LINEAR)
-    
-    # Filter valid depth values
-    min_depth = 0.0001
-    max_depth = 1000.0  # Increased max depth to be more inclusive
-    
-    # Check for valid depth values
-    valid_mask = (gt_depth > min_depth) & (gt_depth < max_depth) & (gt_depth != 0)
-    
-    # Debug: Print mask statistics
-    print(f"Valid mask: {valid_mask.sum()} out of {valid_mask.size} pixels")
-    
-    # Only evaluate where we have valid ground truth
-    if valid_mask.sum() < 100:  # Minimum number of valid pixels
-        print(f"Warning: Not enough valid pixels ({valid_mask.sum()})")
-        return None
-        
-    pred_depth_valid = pred_depth[valid_mask]
-    gt_depth_valid = gt_depth[valid_mask]
-    
-    # Check if we have reasonable values
-    if np.all(pred_depth_valid == 0) or np.all(gt_depth_valid == 0):
-        print("Warning: All values are zero")
-        return None
-    
-    # Scale prediction to match ground truth
-    # Use robust scale estimation to handle outliers
-    scale = np.median(gt_depth_valid) / np.median(pred_depth_valid)
-    
-    # Debug: Print scale factor
-    print(f"Scale factor: {scale}")
-    
-    pred_depth_scaled = pred_depth_valid * scale
-    
-    # Compute metrics
-    rmse = np.sqrt(np.mean((pred_depth_scaled - gt_depth_valid) ** 2))
-    abs_rel = np.mean(np.abs(pred_depth_scaled - gt_depth_valid) / gt_depth_valid)
-    sq_rel = np.mean(((pred_depth_scaled - gt_depth_valid) ** 2) / gt_depth_valid)
-    
-    # Handle log metrics carefully
-    valid_log_mask = (pred_depth_scaled > 0) & (gt_depth_valid > 0)
-    if valid_log_mask.sum() > 0:
-        rmse_log = np.sqrt(np.mean((np.log(pred_depth_scaled[valid_log_mask]) - np.log(gt_depth_valid[valid_log_mask])) ** 2))
-    else:
-        rmse_log = float('inf')
-    
-    threshold_ratios = np.maximum(pred_depth_scaled / gt_depth_valid, gt_depth_valid / pred_depth_scaled)
-    delta1 = np.mean(threshold_ratios < 1.25) * 100
-    delta2 = np.mean(threshold_ratios < 1.25 ** 2) * 100
-    delta3 = np.mean(threshold_ratios < 1.25 ** 3) * 100
-    
-    metrics = {
-        'RMSE': rmse,
-        'Abs Rel': abs_rel,
-        'Sq Rel': sq_rel,
-        'RMSE log': rmse_log,
-        'δ < 1.25': delta1,
-        'δ < 1.25²': delta2,
-        'δ < 1.25³': delta3,
+from lora_monst3r import build_monst3r, inject_lora_decoder_and_heads, mark_trainable_lora_and_norms
+
+# Optional cloud optimizer
+cloud_opt = None
+try:
+    cloud_opt = __import__("dust3r.cloud_opt.optimizer", fromlist=["optimizer"])
+except Exception:
+    cloud_opt = None
+
+
+def normalize(img_t: torch.Tensor) -> torch.Tensor:
+    mean = torch.tensor([0.485, 0.456, 0.406])[:, None, None]
+    std  = torch.tensor([0.229, 0.224, 0.225])[:, None, None]
+    return (img_t - mean) / std
+
+
+def load_frame(root: str, rel_traj: str, fid: int, image_size: int) -> Dict[str, Any]:
+    traj_dir = os.path.join(root, rel_traj)
+    img = Image.open(os.path.join(traj_dir, "images", f"{fid:06d}.png")).convert("RGB")
+    Kp  = os.path.join(traj_dir, "intrinsics", "intrinsics.npy")
+    Dp  = os.path.join(traj_dir, "depths", f"{fid:06d}.npy")
+    Pp  = os.path.join(traj_dir, "poses", f"{fid:06d}.npy")
+
+    resize = transforms.Resize((image_size, image_size), interpolation=transforms.InterpolationMode.BILINEAR)
+    img_t = normalize(transforms.ToTensor()(resize(img)))
+
+    out = {
+        "image": img_t,
+        "K": torch.from_numpy(np.load(Kp)).float() if os.path.isfile(Kp) else None,
+        "depth_gt": torch.from_numpy(np.load(Dp)).float() if os.path.isfile(Dp) else None,
+        "pose": torch.from_numpy(np.load(Pp)).float() if os.path.isfile(Pp) else None
     }
-    
-    return metrics
+    return out
 
-def visualize_depth(depth):
-    """Create color visualization of depth map"""
-    depth = depth.squeeze()
-    
-    # Ignore zero values in statistics
-    valid_mask = depth > 0
-    if valid_mask.sum() > 0:
-        depth_min = depth[valid_mask].min()
-        depth_max = depth[valid_mask].max()
-    else:
-        depth_min = 0
-        depth_max = 1
-    
-    if depth_max - depth_min < 1e-6:
-        normalized_depth = np.zeros_like(depth)
-    else:
-        normalized_depth = (depth - depth_min) / (depth_max - depth_min)
-    
-    # Apply mask for better visualization
-    if valid_mask.sum() > 0:
-        normalized_depth[~valid_mask] = 0
-    
-    colored_depth = (plt.cm.plasma(normalized_depth)[:, :, :3] * 255).astype(np.uint8)
-    
-    # Make zero values black
-    colored_depth[~valid_mask] = 0
-    
-    return colored_depth
 
-def load_ground_truth_depth(organ_dir, image_id):
-    """Load ground truth depth from the original dataset"""
-    gt_depth_path = organ_dir / 'depths' / f"{image_id}.npy"
-    if not gt_depth_path.exists():
-        return None
-    return np.load(gt_depth_path).astype(np.float32)
+def group_split_by_traj(split_file: str) -> Dict[str, List[int]]:
+    groups: Dict[str, List[int]] = defaultdict(list)
+    with open(split_file, "r") as f:
+        for line in f:
+            rel, idx = line.strip().split()
+            groups[rel].append(int(idx))
+    for k in groups:
+        groups[k].sort()
+    return groups
 
-def load_predicted_depth(results_organ_dir, image_id):
-    """Load predicted depth from inference results"""
-    pred_depth_path = results_organ_dir / 'depth' / f"{image_id}_depth.npy"
-    if not pred_depth_path.exists():
-        return None
-    return np.load(pred_depth_path).astype(np.float32)
 
-def create_comparison_visualization(image_path, pred_depth, gt_depth, output_dir, idx):
-    """Create visualization comparing predicted and ground truth depth"""
-    vis_dir = output_dir / 'visualizations'
-    vis_dir.makedirs_p()
-    
-    # Load image
-    img = cv2.imread(str(image_path))
-    if img is None:
-        return
-    
-    # Resize image to match depth maps
-    img = cv2.resize(img, (512, 288))  # Using the dimensions from your inference script
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
-    # Ensure depths match the expected dimensions
-    if pred_depth.shape != gt_depth.shape:
-        pred_depth = cv2.resize(pred_depth, (gt_depth.shape[1], gt_depth.shape[0]), interpolation=cv2.INTER_LINEAR)
-    
-    # Create depth visualizations
-    pred_viz = visualize_depth(pred_depth)
-    gt_viz = visualize_depth(gt_depth)
-    
-    # Calculate error map
-    error = np.abs(pred_depth - gt_depth)
-    error_viz = visualize_depth(error)
-    
-    # Create side-by-side comparison
-    vis = np.hstack([img, pred_viz, gt_viz, error_viz])
-    
-    # Add labels
-    fig, ax = plt.subplots(1, 1, figsize=(16, 4))
-    ax.imshow(vis)
-    ax.set_title(f'RGB | Predicted | Ground Truth | Error - Sample {idx}')
-    ax.axis('off')
-    
-    plt.tight_layout()
-    plt.savefig(str(vis_dir / f'comparison_{idx}.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    # Also save individual depth maps for debugging
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    axes[0].imshow(pred_depth)
-    axes[0].set_title(f'Predicted Depth\nMin: {pred_depth.min():.3f}, Max: {pred_depth.max():.3f}')
-    axes[1].imshow(gt_depth)
-    axes[1].set_title(f'Ground Truth Depth\nMin: {gt_depth.min():.3f}, Max: {gt_depth.max():.3f}')
-    axes[2].imshow(error)
-    axes[2].set_title(f'Error\nMin: {error.min():.3f}, Max: {error.max():.3f}')
-    
-    for ax in axes:
-        ax.axis('off')
-    
-    plt.tight_layout()
-    plt.savefig(str(vis_dir / f'debug_{idx}.png'), dpi=300, bbox_inches='tight')
-    plt.close()
+def si_log_rmse(pred_depth: torch.Tensor, gt_depth: torch.Tensor, valid_mask: torch.Tensor) -> float:
+    # pred_depth, gt_depth: [H,W] tensors, valid_mask: bool [H,W]
+    m = valid_mask & torch.isfinite(pred_depth) & torch.isfinite(gt_depth) & (gt_depth > 0)
+    if m.sum() == 0:
+        return float("nan")
+    d = (pred_depth[m].log() - gt_depth[m].log())
+    val = torch.sqrt(d.pow(2).mean() - d.mean().pow(2))
+    return float(val.cpu().item())
 
-def evaluate_results():
-    """Evaluate the inference results against ground truth"""
-    original_data_path = Path(args.original_data_path)
-    results_path = Path(args.results_path)
-    output_dir = Path(args.output_dir)
-    output_dir.makedirs_p()
-    
-    # Get all organ directories from the original dataset
-    organ_dirs = [d for d in original_data_path.iterdir() if d.is_dir()]
-    
-    all_metrics = []
-    sample_count = 0
-    visualized_samples = 0
-    failed_samples = 0
-    
-    print(f"Evaluating results for {len(organ_dirs)} organs...")
-    
-    for organ_dir in organ_dirs:
-        organ_name = organ_dir.name
-        results_organ_dir = results_path / organ_name
-        
-        if not results_organ_dir.exists():
-            print(f"Warning: No results found for {organ_name}")
-            continue
-            
-        # Get all images in the original dataset for this organ
-        image_dir = organ_dir / 'images'
-        image_files = sorted(glob.glob(str(image_dir / '*.png')))
-        
-        print(f"Processing {organ_name} with {len(image_files)} images...")
-        
-        for image_path in tqdm(image_files):
-            image_id = os.path.splitext(os.path.basename(image_path))[0]
-            
-            # Load ground truth depth
-            gt_depth = load_ground_truth_depth(organ_dir, image_id)
-            if gt_depth is None:
-                print(f"No GT depth for {image_id}")
+
+def pointmap_to_depth_in_cam(pts_world: torch.Tensor, cam_pose: torch.Tensor) -> torch.Tensor:
+    """
+    pts_world: [H,W,3]; cam_pose: [4,4] (world-to-camera or camera-to-world?)
+    We expect cam_pose to be world->camera extrinsic (if your stored pose is camera->world, invert it).
+    """
+    H, W, _ = pts_world.shape
+    ones = torch.ones(H, W, 1, device=pts_world.device, dtype=pts_world.dtype)
+    P = torch.cat([pts_world, ones], dim=-1)  # [H,W,4]
+    cam = (cam_pose @ P.view(-1, 4).T).T.view(H, W, 4)
+    z = cam[..., 2].clamp(min=1e-6)
+    return z
+
+
+@torch.no_grad()
+def run_pairwise(model, frames1, frames2, device):
+    """
+    frames1, frames2: dicts with 'image' tensor [3,H,W]
+    Returns dict with pointmaps/confidences if available.
+    """
+    b = {
+        "image1": frames1["image"].unsqueeze(0).to(device),
+        "image2": frames2["image"].unsqueeze(0).to(device),
+        "meta": [{
+            # Provide per-view meta for potential loss/inference utils
+            "camera_pose": frames1.get("pose"),  # optional
+            "valid_mask": None,                  # optional
+            "pts3d": None                        # optional (GT pts if available)
+        }]
+    }
+    try:
+        out = model.core(b) if hasattr(model, "core") else model(b)
+    except TypeError:
+        # some models accept (image1, image2)
+        core = model.core if hasattr(model, "core") else model
+        out = core(b["image1"], b["image2"])
+
+    return out  # dict expected in MonST3R/DUSt3R
+
+
+def extract_pointmap_depth_pairwise(out_dict, direction="12") -> Optional[torch.Tensor]:
+    """
+    Given model output dict, try to return depth from a pointmap in 'direction':
+    direction '12' means points of view2 in view1 frame, we take Z.
+    """
+    keys = {
+        "12": ["p12", "pts12", "xyz12", "P12", "pointmap12"],
+        "21": ["p21", "pts21", "xyz21", "P21", "pointmap21"]
+    }[direction]
+    for k in keys:
+        if k in out_dict and torch.is_tensor(out_dict[k]):
+            P = out_dict[k]  # [B,H,W,3] or [H,W,3]
+            if P.dim() == 4:
+                P = P[0]
+            depth = P[..., 2].clamp(min=1e-6)
+            return depth
+    return None
+
+
+def maybe_invert_pose(pose: torch.Tensor, already_world_to_cam: bool = False) -> torch.Tensor:
+    """
+    If stored pose is camera->world, invert. Heuristic: if bottom-right element ~1 and upper-left ~ rotation.
+    """
+    if already_world_to_cam:
+        return pose
+    # assume provided is cam->world (common), return world->cam
+    # fast inverse for SE(3):
+    R = pose[:3, :3]
+    t = pose[:3, 3:4]
+    Rt = R.t()
+    Tw = -Rt @ t
+    out = torch.eye(4, dtype=pose.dtype, device=pose.device)
+    out[:3, :3] = Rt
+    out[:3, 3] = Tw.view(-1)
+    return out
+
+
+def build_model_for_eval(arch, ckpt, device, lora_rank=0, lora_alpha=0, lora_dropout=0.0):
+    core = build_monst3r(arch=arch, checkpoint=ckpt, device=device)
+    if lora_rank > 0:
+        inject_lora_decoder_and_heads(core, r=lora_rank, alpha=lora_alpha, dropout=lora_dropout, verbose=True)
+        # freeze base except LoRA (eval uses the adapted weights); no need to set grads
+        mark_trainable_lora_and_norms(core, train_norms=False)
+    return core
+
+
+def run_cloud_optimization(edge_store: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    edge_store: list of pair dicts with fields like:
+      {'t': t, 'tp': tp, 'p_ttp': tensor(H,W,3), 'p_tpt': tensor(H,W,3), 'conf_ttp': tensor(H,W,1), ...}
+    Returns dict with per-frame global pointmaps and camera poses.
+    """
+    if cloud_opt is None:
+        print("[WARN] cloud optimizer not available; returning empty result.")
+        return {}
+
+    # The exact API differs across commits. We call a generic "optimize" entry if available.
+    # Try dust3r.cloud_opt.optimizer.Optimizer or a functional interface.
+    try:
+        OptimizerClass = getattr(cloud_opt, "Optimizer", None)
+        if OptimizerClass is None:
+            # module-level optimize(...)?
+            optimize_fn = getattr(cloud_opt, "optimize", None)
+            if optimize_fn is None:
+                print("[WARN] Optimizer API not found.")
+                return {}
+            return optimize_fn(edge_store)
+        else:
+            opt = OptimizerClass()
+            return opt.optimize(edge_store)
+    except Exception as e:
+        print(f"[WARN] Cloud optimization failed: {e}")
+        return {}
+
+
+def eval_sequence(device, model, root, rel_traj, fids, image_size, assume_cam_to_world=True):
+    """
+    Returns:
+      results = {
+        'pairwise': [si_log_rmse per frame_id (where computable)],
+        'optimized': [si_log_rmse per frame_id after global optimization],
+      }
+    """
+    # Load frames
+    frames = {fid: load_frame(root, rel_traj, fid, image_size) for fid in fids}
+    # Pairwise pass and SI-log-RMSE per frame using p_t->t+1 in t frame
+    pairwise_scores = []
+
+    edge_store = []  # accumulate for optimization
+    for i in range(len(fids) - 1):
+        t, tp = fids[i], fids[i+1]
+        out = run_pairwise(model, frames[t], frames[tp], device)
+        # store edges
+        rec = {"t": t, "tp": tp}
+        if isinstance(out, dict):
+            for a, b in [ (["p12","pts12","xyz12","P12","pointmap12"], "p_ttp"),
+                          (["p21","pts21","xyz21","P21","pointmap21"], "p_tpt"),
+                          (["conf12","c12","confidence12"], "conf_ttp"),
+                          (["conf21","c21","confidence21"], "conf_tpt") ]:
+                for k in a:
+                    if k in out and torch.is_tensor(out[k]):
+                        rec[b] = out[k].detach().cpu()
+                        break
+        edge_store.append(rec)
+
+        # Pairwise SI-log-RMSE in frame t
+        depth_pred_t = extract_pointmap_depth_pairwise(out, direction="12")
+        gt = frames[t]["depth_gt"]
+        if depth_pred_t is not None and gt is not None:
+            H, W = depth_pred_t.shape[-2:]
+            gt_r = torch.nn.functional.interpolate(gt[None, None, ...], size=(H, W), mode="nearest")[0, 0]
+            valid = gt_r > 0
+            s = si_log_rmse(depth_pred_t, gt_r, valid)
+            pairwise_scores.append(s)
+
+    # Global optimization stage (accumulate edges -> global pointmaps and camera poses)
+    optimized_scores = []
+    glob = run_cloud_optimization(edge_store)
+    # Expect something like glob["poses"][t] -> [4,4] world->cam, glob["pointmaps"][t] -> [H,W,3]
+    if isinstance(glob, dict) and "poses" in glob and "pointmaps" in glob:
+        for t in fids:
+            if t not in glob["pointmaps"] or frames[t]["depth_gt"] is None:
                 continue
-                
-            # Load predicted depth
-            pred_depth = load_predicted_depth(results_organ_dir, image_id)
-            if pred_depth is None:
-                print(f"No predicted depth for {image_id}")
-                continue
-            
-            # Debug: Print shapes and statistics
-            print(f"\nProcessing {image_id}")
-            print(f"GT shape: {gt_depth.shape}, Pred shape: {pred_depth.shape}")
-            print(f"GT range: [{gt_depth.min()}, {gt_depth.max()}]")
-            print(f"Pred range: [{pred_depth.min()}, {pred_depth.max()}]")
-            
-            # Compute metrics for this sample
-            metrics = compute_metrics(pred_depth, gt_depth)
-            
-            if metrics is not None:
-                all_metrics.append(metrics)
-                sample_count += 1
-                
-                # Create visualization for first few samples
-                if visualized_samples < 10:
-                    create_comparison_visualization(image_path, pred_depth, gt_depth, output_dir, visualized_samples)
-                    visualized_samples += 1
-            else:
-                failed_samples += 1
-    
-    print(f"\nProcessed {sample_count} samples successfully, {failed_samples} failed")
-    
-    # Aggregate metrics across all samples
-    if len(all_metrics) > 0:
-        avg_metrics = {
-            k: np.mean([m[k] for m in all_metrics])
-            for k in all_metrics[0].keys()
-        }
-        
-        # Convert numpy types to Python types for JSON serialization
-        avg_metrics_serializable = {
-            k: float(v) for k, v in avg_metrics.items()
-        }
-        
-        # Save metrics to JSON
-        metrics_path = output_dir / 'metrics.json'
-        with open(metrics_path, 'w') as f:
-            json.dump(avg_metrics_serializable, f, indent=4)
-        
-        # Print metrics
-        print(f"\nEvaluation Results (based on {sample_count} samples):")
-        print("-" * 40)
-        for metric, value in avg_metrics.items():
-            print(f"{metric:10}: {float(value):.4f}")
-        print("-" * 40)
-        
-        # Create and save a metrics plot
-        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-        ax.bar(range(len(avg_metrics)), list(avg_metrics.values()))
-        ax.set_xticks(range(len(avg_metrics)))
-        ax.set_xticklabels(list(avg_metrics.keys()), rotation=45)
-        ax.set_ylabel('Metric Value')
-        ax.set_title('Depth Prediction Evaluation Metrics')
-        plt.tight_layout()
-        plt.savefig(str(output_dir / 'metrics_plot.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"\nResults saved to {output_dir}")
-    else:
-        print("Evaluation failed - no valid predictions found")
+            pts_world = glob["pointmaps"][t]  # [H,W,3] torch
+            pose_wc = glob["poses"][t]       # world->cam [4,4]
+            if not torch.is_tensor(pts_world):
+                pts_world = torch.from_numpy(np.asarray(pts_world))
+            if not torch.is_tensor(pose_wc):
+                pose_wc = torch.from_numpy(np.asarray(pose_wc))
+            if assume_cam_to_world and frames[t]["pose"] is not None:
+                # If GT pose likely cam->world, keep optimizer using world frame; we only need depth in camera t
+                pass
+            depth_pred = pointmap_to_depth_in_cam(pts_world.to(torch.float32), pose_wc.to(torch.float32))
+            gt = frames[t]["depth_gt"]
+            H, W = depth_pred.shape[-2:]
+            gt_r = torch.nn.functional.interpolate(gt[None, None, ...], size=(H, W), mode="nearest")[0, 0]
+            valid = gt_r > 0
+            optimized_scores.append(si_log_rmse(depth_pred, gt_r, valid))
+
+    return {"pairwise": pairwise_scores, "optimized": optimized_scores}
+
+
+def main():
+    pa = argparse.ArgumentParser("Evaluate SI-log-RMSE (pairwise and optimized global)")
+    pa.add_argument("--dataset", type=str, choices=["c3vd", "endoslam"], required=True)
+    pa.add_argument("--data-root", type=str, required=True)
+    pa.add_argument("--split", type=str, default="val")
+    pa.add_argument("--image-size", type=int, default=384)
+    pa.add_argument("--arch", type=str, default="base")
+    pa.add_argument("--ckpt", type=str, required=True)
+    pa.add_argument("--lora-rank", type=int, default=0)
+    pa.add_argument("--lora-alpha", type=int, default=0)
+    pa.add_argument("--lora-dropout", type=float, default=0.0)
+    pa.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    pa.add_argument("--output-csv", type=str, default="outputs/eval_si_log_rmse.csv")
+    args = pa.parse_args()
+
+    split_folder = "train_test_c3vd" if args.dataset.lower() == "c3vd" else "train_test_endoslam"
+    split_file = os.path.join(args.data_root, split_folder, f"{args.split}.txt")
+    groups = group_split_by_traj(split_file)
+
+    device = args.device
+    model = build_model_for_eval(args.arch, args.ckpt, device, lora_rank=args.lora-rank if hasattr(args,'lora-rank') else args.lora_rank, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout)
+    model.eval()
+
+    os.makedirs(os.path.dirname(args.output_csv), exist_ok=True)
+    rows = []
+    all_pair, all_opt = [], []
+
+    for rel_traj, fids in groups.items():
+        print(f"[Eval] Trajectory: {rel_traj} | frames: {len(fids)}")
+        res = eval_sequence(device, model, args.data_root, rel_traj, fids, args.image_size)
+        pair_mean = float(np.nanmean(res["pairwise"])) if len(res["pairwise"]) else float("nan")
+        opt_mean  = float(np.nanmean(res["optimized"])) if len(res["optimized"]) else float("nan")
+        rows.append({"trajectory": rel_traj, "pairwise_si_log_rmse": pair_mean, "optimized_si_log_rmse": opt_mean})
+        if not np.isnan(pair_mean): all_pair.append(pair_mean)
+        if not np.isnan(opt_mean):  all_opt.append(opt_mean)
+
+    # global summary
+    rows.append({"trajectory": "__OVERALL__", "pairwise_si_log_rmse": float(np.mean(all_pair)) if all_pair else float("nan"),
+                 "optimized_si_log_rmse": float(np.mean(all_opt)) if all_opt else float("nan")})
+
+    with open(args.output_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["trajectory", "pairwise_si_log_rmse", "optimized_si_log_rmse"])
+        w.writeheader()
+        w.writerows(rows)
+
+    print(f"[DONE] Wrote: {args.output_csv}")
+
 
 if __name__ == "__main__":
-    evaluate_results()
+    main()

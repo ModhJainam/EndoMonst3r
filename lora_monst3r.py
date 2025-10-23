@@ -1,5 +1,6 @@
 # lora_monst3r.py
-# LoRA finetuning for MonST3R's DUSt3R-based model — ONLY decoder + pointmap/confidence heads.
+# LoRA fine-tuning for MonST3R: ONLY decoder + pointmap/confidence heads are adapted.
+# Uses DUSt3R/MonST3R native pairwise dynamic losses (Regr3D* + ConfLoss).
 
 import os
 import math
@@ -16,6 +17,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
+
 # -----------------------------
 # Safe import helper
 # -----------------------------
@@ -26,19 +28,14 @@ def try_import(module: str, name: Optional[str] = None):
     except Exception:
         return None
 
+
 # ==========================================
-# Build MonST3R/DUSt3R model from local repo
+# Build MonST3R / DUSt3R model from repo
 # ==========================================
 def build_monst3r(arch: str = "base", checkpoint: Optional[str] = None, device: str = "cuda"):
-    """
-    Attempts common builders in the MonST3R repo. Adjust if your local API differs.
-    """
     model = None
 
-    # MonST3R ships a DUSt3R fork under dust3r/, with builder patterns:
-    #  - dust3r.build.build_model(arch)
-    #  - dust3r.model.get_model(arch)
-    # If MonST3R exposes a top-level factory, you can add it below.
+    # Common builders in MonST3R/DUSt3R repos
     build_mod = try_import("dust3r.build")
     if build_mod and hasattr(build_mod, "build_model"):
         model = build_mod.build_model(arch)
@@ -53,7 +50,6 @@ def build_monst3r(arch: str = "base", checkpoint: Optional[str] = None, device: 
 
     model.to(device)
 
-    # (Optional) load pretrained MonST3R/DUSt3R weights
     if checkpoint and os.path.isfile(checkpoint):
         ckpt = torch.load(checkpoint, map_location=device)
         sd = ckpt.get("state_dict", ckpt)
@@ -61,6 +57,7 @@ def build_monst3r(arch: str = "base", checkpoint: Optional[str] = None, device: 
         print(f"[Load] Missing: {len(missing)}  Unexpected: {len(unexpected)}")
 
     return model
+
 
 # =================
 # LoRA for Linear
@@ -95,38 +92,30 @@ class LoRALinear(nn.Module):
             y = y + self.drop(self.B(self.A(x))) * self.scaling
         return y
 
+
 def _qual_named_children(m: nn.Module, prefix: str = ""):
     for n, ch in m.named_children():
         fq = f"{prefix}.{n}" if prefix else n
         yield fq, ch
         yield from _qual_named_children(ch, fq)
 
-def inject_lora_decoder_and_heads(
-    model: nn.Module,
-    r: int,
-    alpha: int,
-    dropout: float,
-    verbose: bool = True
-):
+
+def inject_lora_decoder_and_heads(model: nn.Module, r: int, alpha: int, dropout: float, verbose: bool = True):
     """
     Wrap ONLY decoder and head Linear layers with LoRA:
-      - Include paths containing: 'decoder' OR head keywords
-      - Exclude anything containing: 'encoder'
-    Head keywords cover pointmap & confidence heads.
+      - Include: 'decoder' OR head keywords
+      - Exclude: 'encoder'
     """
     include_keywords = ["decoder", "head", "pointmap", "conf", "confidence", "reg", "regressor", "pred"]
     exclude_keywords = ["encoder"]
 
     replaced = 0
     for fq, ch in list(_qual_named_children(model)):
-        # Skip encoders entirely
         if any(kw in fq.lower() for kw in exclude_keywords):
             continue
-
         if isinstance(ch, nn.Linear):
             lower = fq.lower()
             if any(kw in lower for kw in include_keywords):
-                # Replace this Linear with LoRA-wrapped Linear
                 parent = model
                 parts = fq.split(".")
                 for p in parts[:-1]:
@@ -139,6 +128,7 @@ def inject_lora_decoder_and_heads(
     if verbose:
         print(f"[LoRA] Total wrapped Linear layers (decoder+heads only): {replaced}")
     return model
+
 
 def mark_trainable_lora_and_norms(model: nn.Module, train_norms: bool = False):
     trainable, total = 0, 0
@@ -153,10 +143,10 @@ def mark_trainable_lora_and_norms(model: nn.Module, train_norms: bool = False):
     print(f"[LoRA] Trainable params: {trainable:,} / {total:,}")
     return model
 
+
 # =================
 # Datasets / Pairs
 # =================
-
 def _img_to_tensor(img: Image.Image) -> torch.Tensor:
     return transforms.ToTensor()(img)
 
@@ -165,12 +155,13 @@ def _normalize(t: torch.Tensor) -> torch.Tensor:
     std  = torch.tensor([0.229, 0.224, 0.225])[:, None, None]
     return (t - mean) / std
 
+
 class GenericFramesDataset(Dataset):
     """
-    Fallback dataset if your project-specific datasets aren't importable.
-    Expects split files like:
-      - root/train_test_c3vd/{train,val}.txt    OR
-      - root/train_test_endoslam/{train,val}.txt
+    Fallback if project-specific datasets aren't importable.
+    Split files:
+      - root/train_test_c3vd/{split}.txt
+      - root/train_test_endoslam/{split}.txt
     Each line: "<relative_trajectory_path> <frame_idx>"
     """
     def __init__(self, root: str, split: str, split_folder: str, image_size: int = 384, load_depth: bool = True):
@@ -185,7 +176,7 @@ class GenericFramesDataset(Dataset):
         with open(split_file, "r") as f:
             self.samples = [line.strip().split() for line in f if line.strip()]
 
-        # Preload intrinsics per trajectory if available
+        # preload intrinsics per trajectory if available
         self.traj_intr = {}
         for rel_traj, _ in self.samples:
             if rel_traj not in self.traj_intr:
@@ -224,9 +215,10 @@ class GenericFramesDataset(Dataset):
         if K is not None: out["intrinsics"] = torch.from_numpy(K).float()
         return out
 
-# Try user's concrete dataset classes if they exist
+
+# Try project-specific datasets if available
 C3VDDataset = try_import("datasets.c3vd_dataset", "C3VDDataset") or try_import("datasets.c3vd", "C3VDDataset")
-EndoSLAMDataset = try_import("datasets.endoslam_dataset", "EndoSLAMDataset") or try_import("datasets.endoslam", "EndoSLAMDataset")
+EndoSLAMDataset = try_import("datasets.endoslam_dataset", "EndoSLAMDataset") or try_import("endoslam_dataset", "EndoSLAMDataset")
 
 class PairFromSinglesDataset(Dataset):
     """
@@ -284,6 +276,7 @@ class PairFromSinglesDataset(Dataset):
             }
         }
 
+
 def build_dataset(dataset: str, root: str, split: str, image_size: int) -> Dataset:
     dataset = dataset.lower()
     if dataset == "c3vd":
@@ -301,57 +294,60 @@ def build_dataset(dataset: str, root: str, split: str, image_size: int) -> Datas
 
     return PairFromSinglesDataset(base, image_size=image_size, pair_window=10)
 
-# ===========================
-# Loss: fallback contrastive
-# ===========================
-class SimpleContrastivePairLoss(nn.Module):
-    def __init__(self, temperature: float = 0.07):
-        super().__init__()
-        self.t = temperature
 
-    def forward(self, z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
-        if z1.dim() > 2:
-            z1 = z1.mean(dim=tuple(range(1, z1.dim()-1)))
-            z2 = z2.mean(dim=tuple(range(1, z2.dim()-1)))
-        z1 = F.normalize(z1, dim=-1)
-        z2 = F.normalize(z2, dim=-1)
-        logits = z1 @ z2.t() / self.t
-        labels = torch.arange(z1.size(0), device=z1.device)
-        return 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.t(), labels))
+# ===========================
+# Native pairwise dynamic loss
+# ===========================
+# Directly use your losses.py primitives
+_losses_mod = try_import("dust3r.losses")
+if _losses_mod is None:
+    raise RuntimeError("dust3r.losses not found (required).")
+L21 = getattr(_losses_mod, "L21")
+Regr3D_ScaleShiftInv = getattr(_losses_mod, "Regr3D_ScaleShiftInv")
+ConfLoss = getattr(_losses_mod, "ConfLoss")
 
-# ===========================================
-# Wrapper: use native loss if model provides it
-# ===========================================
-class Monst3rWithLoss(nn.Module):
-    def __init__(self, core: nn.Module, fallback_temperature: float = 0.07):
+
+class DynamicLossAdapter(nn.Module):
+    """
+    Adapter that applies the native DUSt3R/MonST3R pairwise losses on pointmaps + confidence.
+    """
+    def __init__(self, core: nn.Module, alpha_conf: float = 1.0, norm_mode: str = 'avg_dis', gt_scale: bool = False):
         super().__init__()
         self.core = core
-        self.fallback = SimpleContrastivePairLoss(fallback_temperature)
+        self.pixel_loss = Regr3D_ScaleShiftInv(L21, norm_mode=norm_mode, gt_scale=gt_scale).with_reduction('none')
+        self.crit = ConfLoss(self.pixel_loss, alpha=alpha_conf)
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, Any]:
-        # Try MonST3R/DUSt3R native forward
         try:
-            out = self.core(batch)
+            out = self.core(batch)  # some repos accept dict
         except TypeError:
-            out = self.core(batch["image1"], batch["image2"])
+            out = self.core(batch["image1"], batch["image2"])  # classic two-tensor signature
 
+        # If model already gives loss, use it.
         if isinstance(out, dict) and "loss" in out:
-            loss = out["loss"]
-            logs = {k: (float(v) if torch.is_tensor(v) else v) for k, v in out.items() if k != "loss"}
-            return {"loss": loss, "logs": logs}
+            return {"loss": out["loss"], "logs": {k: (float(v) if torch.is_tensor(v) else v) for k, v in out.items() if k != "loss"}}
 
-        # Otherwise look for embeddings to apply contrastive fallback
-        z1 = out.get("z1") if isinstance(out, dict) else None
-        z2 = out.get("z2") if isinstance(out, dict) else None
-        if z1 is None or z2 is None:
-            if hasattr(self.core, "encode"):
-                z1 = self.core.encode(batch["image1"])
-                z2 = self.core.encode(batch["image2"])
-            else:
-                raise RuntimeError("Cannot infer embeddings from MonST3R output. Adapt wrapper to your local API.")
+        # Map outputs to pred dicts expected by losses
+        pred1, pred2 = {}, {}
+        # common key aliases
+        if isinstance(out, dict):
+            for aliases, key in [ (["p12","pts12","xyz12","P12","pointmap12"], "pts3d"),
+                                  (["conf12","c12","confidence12"], "conf") ]:
+                for a in aliases:
+                    if a in out: pred1[key] = out[a]; break
+            for aliases, key in [ (["p21","pts21","xyz21","P21","pointmap21"], "pts3d"),
+                                  (["conf21","c21","confidence21"], "conf") ]:
+                for a in aliases:
+                    if a in out: pred2[key] = out[a]; break
 
-        loss = self.fallback(z1, z2)
-        return {"loss": loss, "logs": {"contrastive_loss": float(loss.detach().item())}}
+        # GT dicts (must include camera_pose, pts3d/valid_mask if available)
+        meta_list = batch.get("meta", [])
+        gt1 = meta_list[0] if isinstance(meta_list, list) and len(meta_list) > 0 else {}
+        gt2 = meta_list[0] if isinstance(meta_list, list) and len(meta_list) > 0 else {}
+
+        loss, details = self.crit(gt1, gt2, pred1, pred2)
+        return {"loss": loss, "logs": {k: float(v) for k, v in details.items()}}
+
 
 # =========================
 # Train / Val / Checkpoint
@@ -367,6 +363,7 @@ class TrainConfig:
     log_every: int = 25
     device: str = "cuda"
 
+
 def collate_fn(batch):
     return {
         "image1": torch.stack([b["image1"] for b in batch], dim=0),
@@ -374,12 +371,19 @@ def collate_fn(batch):
         "meta": [b["meta"] for b in batch]
     }
 
+
 def make_loader(ds: Dataset, batch_size: int, num_workers: int, shuffle: bool) -> DataLoader:
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
                       pin_memory=True, collate_fn=collate_fn)
 
-def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Optimizer,
-                    scaler: Optional[torch.cuda.amp.GradScaler], cfg: TrainConfig) -> Dict[str, float]:
+
+def train_one_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    cfg: TrainConfig
+) -> Dict[str, float]:
     model.train()
     device = cfg.device
     losses = []
@@ -389,6 +393,7 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim
         with torch.cuda.amp.autocast(enabled=device.startswith("cuda")):
             out = model(batch)
             loss = out["loss"]
+
         if scaler is not None:
             scaler.scale(loss).backward()
             if cfg.grad_clip is not None:
@@ -401,11 +406,14 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim
             if cfg.grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             optimizer.step()
+
         losses.append(loss.detach().item())
         if (it + 1) % cfg.log_every == 0:
             window = losses[-cfg.log_every:]
             print(f"  iter {it+1}/{len(loader)} | loss {sum(window)/len(window):.4f}")
+
     return {"loss": float(sum(losses) / max(1, len(losses)))}
+
 
 @torch.no_grad()
 def validate(model: nn.Module, loader: DataLoader, cfg: TrainConfig) -> Dict[str, float]:
@@ -418,10 +426,12 @@ def validate(model: nn.Module, loader: DataLoader, cfg: TrainConfig) -> Dict[str
         losses.append(out["loss"].detach().item())
     return {"loss": float(sum(losses) / max(1, len(losses)))}
 
+
 def save_checkpoint(path: str, model: nn.Module, optimizer: torch.optim.Optimizer, epoch: int, extra: Dict[str, Any]):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save({"epoch": epoch, "model": model.state_dict(), "optimizer": optimizer.state_dict(), "extra": extra}, path)
     print(f"[CKPT] saved: {path}")
+
 
 def build_lora_monst3r(
     arch: str,
@@ -430,9 +440,12 @@ def build_lora_monst3r(
     lora_alpha: int,
     lora_dropout: float,
     train_norms: bool,
-    device: str
+    device: str,
+    alpha_conf: float = 1.0,
+    norm_mode: str = "avg_dis",
+    gt_scale: bool = False
 ) -> nn.Module:
     core = build_monst3r(arch=arch, checkpoint=checkpoint, device=device)
     core = inject_lora_decoder_and_heads(core, r=lora_rank, alpha=lora_alpha, dropout=lora_dropout, verbose=True)
     core = mark_trainable_lora_and_norms(core, train_norms=train_norms)
-    return Monst3rWithLoss(core)
+    return DynamicLossAdapter(core, alpha_conf=alpha_conf, norm_mode=norm_mode, gt_scale=gt_scale)
