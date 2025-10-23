@@ -231,7 +231,7 @@ class DepthViewer:
                 
                 # Add colorbar
                 cbar = self.fig.colorbar(im, ax=ax)
-                cbar.set_label('Depth (meters)')
+                cbar.set_label('Depth (mm)')
                 
             elif view_mode == "side-by-side":
                 # Show image and depth side by side if available
@@ -263,7 +263,7 @@ class DepthViewer:
                     
                     # Add colorbar
                     cbar = self.fig.colorbar(im, ax=ax2)
-                    cbar.set_label('Depth (meters)')
+                    cbar.set_label('Depth (mm)')
                     
                 elif 'image' in self.files[index]:
                     # Only image available
@@ -292,7 +292,7 @@ class DepthViewer:
                     
                     # Add colorbar
                     cbar = self.fig.colorbar(im, ax=ax)
-                    cbar.set_label('Depth (meters)')
+                    cbar.set_label('Depth (mm)')
                     
             elif view_mode == "overlay" and 'image' in self.files[index] and 'depth' in self.files[index]:
                 # Overlay depth on RGB image
@@ -332,7 +332,7 @@ class DepthViewer:
                                           norm=plt.Normalize(vmin=vmin, vmax=vmax))
                 sm.set_array([])
                 cbar = self.fig.colorbar(sm, ax=ax)
-                cbar.set_label('Depth (meters)')
+                cbar.set_label('Depth (mm)')
             
             # Update canvas
             self.fig.tight_layout()
